@@ -48,19 +48,74 @@ enabled) `error` with optional `diskFull: true`.
 Values are stored as JSON. Any JSON-serialisable Go value works —
 strings, numbers, objects, arrays, nested structures.
 
-## Operational notes
+## Deployment patterns
 
-**Single replica only.** bbolt locks the database file, so the module
-pod must run at `replicas: 1`. For HA persistence use `postgres_*` from
-`database-module-v0`.
+bbolt is single-writer. The .db file has an exclusive OS-level lock,
+so the deployment shape determines availability:
+
+### 1. Single replica (default) — RWO PVC, `replicas: 1`
+
+Simplest. One pod owns the file. Failure modes:
+
+- **Pod crash / restart on same node**: k8s reschedules, PVC remains
+  attached, new pod opens bbolt within ~5-10s.
+- **Node failure**: PVC detaches from dead node and attaches to a new
+  one — typically 30-90s depending on storage class. During this
+  window all requests fail; flow authors should route store errors
+  through a retry component.
+- **Storage class matters**: GKE `standard-rwo` typically detaches in
+  ~30s; some CSI drivers are slower. Test your failure mode.
+
+This is what `Settings.LeaderOnly = false` configures. Good enough for
+single-tenant clusters, internal tooling, demos.
+
+### 2. Leader-only mode — RWX PVC, `replicas: N`
+
+For deployments that want fast failover and can pay for RWX storage.
+Set `Settings.LeaderOnly = true`. Behaviour:
+
+- All N pods come up; SDK leader-election picks one.
+- Leader opens bbolt, holds the file lock, serves requests.
+- Followers refuse with `Retryable: true` on the error port.
+- Leader dies → election fires (~10s) → new leader retries
+  `bbolt.Open` for up to 30s until the prior leader's lock releases
+  (clean death is instant; dirty death waits for NFS/CSI cleanup).
+
+Tradeoffs:
+
+- **RWX storage (Filestore / EFS) is ~10× the cost of block storage**
+  and slower per-op. The whole point of bbolt was cheap embedded
+  storage; using RWX moves you partway toward "just use postgres."
+- **Followers don't serve reads.** Single writer, single reader. The
+  extra replicas are warm standbys, not horizontal scaling.
+- **Load balancer doesn't know about leadership.** Requests that land
+  on a follower fail with `retryable=true`. Callers (or a Kubernetes
+  Service with a smarter health check) need to handle the retry.
+
+### 3. External storage — `postgres_*` / `redis_*` from database-module-v0
+
+When you need real horizontal scaling, multi-region, or sub-second
+failover. The components are stateless clients; the database does
+HA at its layer. Same flow shape — swap `document_store.put` for
+`postgres_exec`, `document_store.get` for `postgres_query` — and the
+LLM never knows the difference.
+
+## Other notes
 
 **PVC required.** Without persistent storage at `Settings.path`, all
 data is lost on pod restart. The Helm chart for `tinysystems-operator`
 supports volume mounts — point a PVC at `/data` (or wherever `path`
-lives) when installing.
+lives) when installing. For LeaderOnly mode, the PVC must be RWX.
 
-**Backup story.** bbolt is a single file. Copy `path` while the pod is
-quiesced. Scheduled backup is out of scope for v1.
+**Lock contention messages.** When `bbolt.Open` times out (30s
+ceiling), the error message specifically names "another pod may be
+holding the file lock" so the operator knows where to look. Common
+causes: a Pending pod with the same PVC, a stuck NFS client on a dead
+node, or a developer running `go run cmd/main.go` against the same
+.db while a pod is also running.
+
+**Backup story.** bbolt is a single file. Copy `path` while the pod
+is quiesced. Scheduled backup is out of scope for v1.
 
 ## Pattern: persistent chat history
 
