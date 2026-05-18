@@ -1,14 +1,16 @@
-module github.com/tiny-systems/example-module
+module github.com/tiny-systems/store-module
 
 go 1.25.0
 
 toolchain go1.25.5
 
 require (
+	github.com/goccy/go-json v0.10.2
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.20.1
-	github.com/tiny-systems/module v0.5.0
+	github.com/tiny-systems/module v0.10.9
+	go.etcd.io/bbolt v1.4.3
 )
 
 require (
@@ -61,7 +63,6 @@ require (
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
-	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect

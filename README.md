@@ -1,70 +1,113 @@
-# Tiny Systems Example Module
+# Tiny Systems Store Module
 
-Template repository for building your own Tiny Systems module. Fork this repo to get started.
+Embedded, persistent storage components for Tiny Systems flows. The
+backing store is [bbolt](https://github.com/etcd-io/bbolt) — pure Go,
+single-file, transactional, used inside etcd itself. Data lives on a PVC
+mounted inside the operator pod so it survives pod restarts.
 
-## What's Included
+## When to use this vs. alternatives
 
-A minimal Echo component that receives a message and passes it through:
+| Use case | Reach for |
+|---|---|
+| Small in-component state (counters, last-seen, port runtime data) | SDK `State` via `module.Base.State()` — protected by `MaxStateBytes = 900KB` since SDK v0.10.9 |
+| Per-flow persistence above ~1MB (chat history, agent scratchpads, retrieval caches) | **document_store** (this module) |
+| Shared persistence across flows / HA requirements | `postgres_*` / `redis_*` in `database-module-v0` |
 
-```go
-func (t *Component) Handle(ctx context.Context, handler module.Handler, port string, msg interface{}) any {
-    if in, ok := msg.(InMessage); ok {
-        return handler(ctx, OutPort, in.Context)
-    }
-    return fmt.Errorf("invalid message")
-}
+`document_store` is the "no external infra" path. One container, one
+file, one PVC. Configure once and any flow can use it via standard
+edges.
+
+## Components
+
+### `document_store`
+
+Embedded KV store with per-collection buckets. Four operation ports
+(`put`, `get`, `delete`, `find`) each with a matching source result port.
+
+**Settings**
+
+| Field | Type | Notes |
+|---|---|---|
+| `path` | string | Absolute path to the bbolt file. Default `/data/store.db`. Mount a PVC at this directory. |
+| `collections` | `[{name}]` | Named buckets. Writes to undeclared collections fail. At least one required. |
+| `maxSizeMB` | int | Soft cap on file size. Puts above this route to error port (`diskFull: true`). Default 1024. |
+| `enableErrorPort` | bool | Route operational failures (disk full, missing collection, marshal errors) to the error port. |
+
+**Ports**
+
+Input (target):
+
+- `put` — `{context, collection, key, value}` → emits on `put_ok`
+- `get` — `{context, collection, key}` → emits on `get_ok` with `{value, found}`
+- `delete` — `{context, collection, key}` → emits on `delete_ok` with `{deleted}` (false if key was absent)
+- `find` — `{context, collection, prefix?, limit?}` → emits on `find_ok` with `{items: [{key, value}], count}`
+
+Output (source): `put_ok`, `get_ok`, `delete_ok`, `find_ok`, and (when
+enabled) `error` with optional `diskFull: true`.
+
+Values are stored as JSON. Any JSON-serialisable Go value works —
+strings, numbers, objects, arrays, nested structures.
+
+## Operational notes
+
+**Single replica only.** bbolt locks the database file, so the module
+pod must run at `replicas: 1`. For HA persistence use `postgres_*` from
+`database-module-v0`.
+
+**PVC required.** Without persistent storage at `Settings.path`, all
+data is lost on pod restart. The Helm chart for `tinysystems-operator`
+supports volume mounts — point a PVC at `/data` (or wherever `path`
+lives) when installing.
+
+**Backup story.** bbolt is a single file. Copy `path` while the pod is
+quiesced. Scheduled backup is out of scope for v1.
+
+## Pattern: persistent chat history
+
+```
+http_server.request → json_decode → document_store.get (conversation key)
+                                  → join messages + new user turn
+                                  → llm_chat (stateless)
+                                  → document_store.put (conversation key)
+                                  → http_server.response
 ```
 
-This demonstrates the core patterns:
-- Component interface (`GetInfo`, `Handle`, `Ports`, `Instance`)
-- Input/output ports with typed messages
-- Handler response propagation (blocking I/O)
-- `configurable:"true"` struct tag for edge data mapping
+`llm_chat` stays stateless and reusable — the flow composes
+persistence around it. Swap `document_store` for `kv` (in
+`common-module-v0`) for small histories, or `postgres_exec` when you
+need HA.
 
-## Project Structure
-
-```
-cmd/main.go              # Entry point — registers components, runs CLI
-components/echo/echo.go  # Example component
-go.mod                   # SDK dependency (github.com/tiny-systems/module)
-```
-
-## Getting Started
-
-1. **Use this template** — click "Use this template" on GitHub
-2. **Rename the module** in `go.mod`
-3. **Add your components** under `components/`
-4. **Register them** via `init()` + `registry.Register()`
-
-## Run Locally
+## Run locally
 
 ```shell
+mkdir -p /tmp/store-module-data
 go run cmd/main.go run \
-  --name=my-org/my-module-v1 \
-  --namespace=tinysystems \
-  --version=1.0.0
+  --name=tinysystems/store-module \
+  --namespace=tinysystems-tinysystems \
+  --version=0.1.0
 ```
 
-## Build and Deploy
+Bind `/data` (or your configured `Settings.path` directory) to a
+writable host path when running outside Kubernetes.
+
+## Deploy
 
 ```shell
-# Build container image
-docker build -t myregistry/my-module:1.0.0 .
-docker push myregistry/my-module:1.0.0
+docker build -t myregistry/store-module:0.1.0 .
+docker push myregistry/store-module:0.1.0
 
-# Install via Helm
-helm repo add tinysystems https://tiny-systems.github.io/module/
-helm install my-module tinysystems/tinysystems-operator \
-  --set controllerManager.manager.image.repository=myregistry/my-module
+helm install store-module tinysystems/tinysystems-operator \
+  --set controllerManager.manager.image.repository=myregistry/store-module \
+  --set persistentVolume.enabled=true \
+  --set persistentVolume.mountPath=/data \
+  --set persistentVolume.size=10Gi \
+  --set controllerManager.replicas=1
 ```
 
-## Resources
-
-- [Developer Guide](https://docs.tinysystems.io/developer-guide/getting-started/hello-world-component) — build your first component
-- [Module SDK](https://github.com/tiny-systems/module) — core library
-- [Component Examples](https://docs.tinysystems.io/examples/components/simple-transformer) — real-world patterns
-- [Tiny Systems Platform](https://tinysystems.io) — visual editor and module directory
+See `helm get values tinysystems-llm-module-v0` (or any other module)
+for the existing Helm shape — the operator chart is shared across all
+modules.
 
 ## License
 
-This module's source code is MIT-licensed. It depends on the [Tiny Systems Module SDK](https://github.com/tiny-systems/module) (BSL 1.1). See [LICENSE](LICENSE) for details.
+MIT for this module's source. Depends on the [Tiny Systems Module SDK](https://github.com/tiny-systems/module) (BSL 1.1) and [bbolt](https://github.com/etcd-io/bbolt) (MIT).
