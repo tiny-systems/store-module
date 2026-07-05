@@ -9,7 +9,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.20.1
-	github.com/tiny-systems/module v0.11.3
+	github.com/tiny-systems/module v0.13.4
 	go.etcd.io/bbolt v1.4.3
 )
 
