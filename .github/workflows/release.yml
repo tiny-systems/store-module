@@ -1,31 +1,54 @@
-name: Build & publish module to the Tiny Systems
+# Publish this module — no platform, no devkey. On a version tag, build the
+# controller-manager image and push it to GHCR under this repo's name. That's
+# the whole "publish": the image is the artifact, GHCR is public, and the
+# tiny-systems/modules index points at ghcr.io/<owner>/<repo>:<version>.
+name: Publish module image to GHCR
 
 on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+  packages: write # push to GHCR with the built-in token
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '>=1.23.1'
-      - run: |
-          echo "Preparing a release"
-          echo "Module name ${{ github.event.repository.name }}"
-          go mod tidy
-          go run cmd/main.go tools build --version ${{github.ref_name}} --name github.com/${{ github.repository }} --devkey ${{secrets.TINY_DEV_SECRET}}
+      - uses: actions/checkout@v4
 
-      - name: Notify e2e
-        if: success()
-        env:
-          MODULE_NAME: ${{ github.event.repository.name }}
-          MODULE_VERSION: ${{ github.ref_name }}
-        uses: peter-evans/repository-dispatch@v3
+      # Image tag is the version without the leading 'v' (v0.5.24 → 0.5.24),
+      # matching what the module index references. GITHUB_REF_NAME is the tag,
+      # constrained to semver by the trigger; used as a shell env var, not
+      # template interpolation.
+      - name: Derive version
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3 # cross-build arm64 on the amd64 runner
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          token: ${{ secrets.E2E_DISPATCH_TOKEN }}
-          repository: tiny-systems/e2e
-          event-type: module-released
-          client-payload: '{"module":"${{ env.MODULE_NAME }}","version":"${{ env.MODULE_VERSION }}"}'
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64 # run on Intel + Apple-silicon clusters
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.v.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+
+      # Note: GHCR packages default to PRIVATE on first push. Make the package
+      # public once (repo → Packages → package → settings → visibility) so any
+      # cluster can pull it without credentials.
