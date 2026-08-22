@@ -8,7 +8,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/tiny-systems/module v0.13.122
-	go.etcd.io/bbolt v1.4.3
+	go.etcd.io/bbolt v1.5.0
 )
 
 require (
